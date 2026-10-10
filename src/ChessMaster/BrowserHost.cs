@@ -669,6 +669,23 @@ internal static class BrowserHost
     private static void HookBoardSwap(CoreWebView2 core)
     {
         Directory.CreateDirectory(BoardsDirectory);
+        var localBoard = Path.Combine(BoardsDirectory, "board.png");
+        if (!File.Exists(localBoard))
+        {
+            foreach (var bundled in new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "board.png"),
+                Path.Combine(AppContext.BaseDirectory, "Assets", "board.png"),
+            })
+            {
+                if (File.Exists(bundled))
+                {
+                    File.Copy(bundled, localBoard);
+                    break;
+                }
+            }
+        }
+
         core.SetVirtualHostNameToFolderMapping(
             "chessmaster.boards",
             BoardsDirectory,

@@ -12,7 +12,7 @@
     <ApplicationIcon>Assets\knight.ico</ApplicationIcon>
     <Product>Chess Master</Product>
     <Description>Desktop shell for chess.com</Description>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -22,6 +22,10 @@
   <ItemGroup>
     <EmbeddedResource Include="Assets\knight.png" />
     <EmbeddedResource Include="Assets\knight.ico" />
+    <Content Include="Assets\board.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>board.png</TargetPath>
+    </Content>
   </ItemGroup>
 
 </Project>
