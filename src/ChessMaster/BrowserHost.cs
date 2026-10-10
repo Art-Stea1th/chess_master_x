@@ -1066,7 +1066,7 @@ internal static class BrowserHost
 
     private static byte[] GetSoftBoard()
     {
-        if (BoardCache.TryGetValue("soft-board", out var bytes))
+        if (BoardCache.TryGetValue("play-board", out var bytes))
         {
             return bytes;
         }
@@ -1077,87 +1077,96 @@ internal static class BrowserHost
             return [];
         }
 
-        bytes = SoftenBoardSquares(File.ReadAllBytes(source));
-        BoardCache["soft-board"] = bytes;
+        bytes = BuildPlayBoard(File.ReadAllBytes(source));
+        BoardCache["play-board"] = bytes;
         return bytes;
     }
 
-    private static byte[] SoftenBoardSquares(byte[] png)
+    private static byte[] BuildPlayBoard(byte[] png)
     {
         using var input = new MemoryStream(png, writable: false);
-        using var bitmap = new Bitmap(input);
-        var area = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
-        var data = bitmap.LockBits(area, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+        using var source = new Bitmap(input);
+        var size = 1200;
+        using var board = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+        var srcArea = new Rectangle(0, 0, source.Width, source.Height);
+        var dstArea = new Rectangle(0, 0, size, size);
+        var srcData = source.LockBits(srcArea, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        var dstData = board.LockBits(dstArea, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
         try
         {
-            var stride = Math.Abs(data.Stride);
-            var bytes = new byte[stride * bitmap.Height];
-            Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+            var srcStride = Math.Abs(srcData.Stride);
+            var dstStride = Math.Abs(dstData.Stride);
+            var srcBytes = new byte[srcStride * source.Height];
+            var dstBytes = new byte[dstStride * size];
+            Marshal.Copy(srcData.Scan0, srcBytes, 0, srcBytes.Length);
+
+            long lightB = 0, lightG = 0, lightR = 0, lightN = 0;
+            long darkB = 0, darkG = 0, darkR = 0, darkN = 0;
             const int files = 8;
-            const int border = 4;
-            for (var cy = 0; cy < files; cy++)
+            for (var y = 0; y < source.Height; y++)
             {
-                for (var cx = 0; cx < files; cx++)
+                var cy = y * files / source.Height;
+                for (var x = 0; x < source.Width; x++)
                 {
-                    var x0 = (cx * bitmap.Width / files) + border;
-                    var y0 = (cy * bitmap.Height / files) + border;
-                    var x1 = ((cx + 1) * bitmap.Width / files) - border;
-                    var y1 = ((cy + 1) * bitmap.Height / files) - border;
-                    if (x1 <= x0 || y1 <= y0)
+                    var cx = x * files / source.Width;
+                    var i = (y * srcStride) + (x * 4);
+                    if (((cx + cy) & 1) == 0)
                     {
-                        continue;
+                        lightB += srcBytes[i];
+                        lightG += srcBytes[i + 1];
+                        lightR += srcBytes[i + 2];
+                        lightN++;
                     }
-
-                    long b = 0;
-                    long g = 0;
-                    long r = 0;
-                    long a = 0;
-                    var n = 0;
-                    for (var y = y0; y < y1; y++)
+                    else
                     {
-                        for (var x = x0; x < x1; x++)
-                        {
-                            var i = (y * stride) + (x * 4);
-                            b += bytes[i];
-                            g += bytes[i + 1];
-                            r += bytes[i + 2];
-                            a += bytes[i + 3];
-                            n++;
-                        }
-                    }
-
-                    if (n == 0)
-                    {
-                        continue;
-                    }
-
-                    var pb = (byte)(b / n);
-                    var pg = (byte)(g / n);
-                    var pr = (byte)(r / n);
-                    var pa = (byte)(a / n);
-                    for (var y = y0; y < y1; y++)
-                    {
-                        for (var x = x0; x < x1; x++)
-                        {
-                            var i = (y * stride) + (x * 4);
-                            bytes[i] = pb;
-                            bytes[i + 1] = pg;
-                            bytes[i + 2] = pr;
-                            bytes[i + 3] = pa;
-                        }
+                        darkB += srcBytes[i];
+                        darkG += srcBytes[i + 1];
+                        darkR += srcBytes[i + 2];
+                        darkN++;
                     }
                 }
             }
 
-            Marshal.Copy(bytes, 0, data.Scan0, bytes.Length);
+            var lb = (byte)(lightB / Math.Max(1, lightN));
+            var lg = (byte)(lightG / Math.Max(1, lightN));
+            var lr = (byte)(lightR / Math.Max(1, lightN));
+            var db = (byte)(darkB / Math.Max(1, darkN));
+            var dg = (byte)(darkG / Math.Max(1, darkN));
+            var dr = (byte)(darkR / Math.Max(1, darkN));
+            const float grain = 0.16f;
+            const float keep = 1f - grain;
+
+            for (var y = 0; y < size; y++)
+            {
+                var cy = y * files / size;
+                var sy = Math.Min(source.Height - 1, y * source.Height / size);
+                for (var x = 0; x < size; x++)
+                {
+                    var cx = x * files / size;
+                    var light = ((cx + cy) & 1) == 0;
+                    var sb = light ? lb : db;
+                    var sg = light ? lg : dg;
+                    var sr = light ? lr : dr;
+                    var sx = Math.Min(source.Width - 1, x * source.Width / size);
+                    var si = (sy * srcStride) + (sx * 4);
+                    var di = (y * dstStride) + (x * 4);
+                    dstBytes[di] = (byte)(sb * keep + srcBytes[si] * grain);
+                    dstBytes[di + 1] = (byte)(sg * keep + srcBytes[si + 1] * grain);
+                    dstBytes[di + 2] = (byte)(sr * keep + srcBytes[si + 2] * grain);
+                    dstBytes[di + 3] = 255;
+                }
+            }
+
+            Marshal.Copy(dstBytes, 0, dstData.Scan0, dstBytes.Length);
         }
         finally
         {
-            bitmap.UnlockBits(data);
+            source.UnlockBits(srcData);
+            board.UnlockBits(dstData);
         }
 
         using var output = new MemoryStream();
-        bitmap.Save(output, ImageFormat.Png);
+        board.Save(output, ImageFormat.Png);
         return output.ToArray();
     }
 
@@ -1205,7 +1214,7 @@ internal static class BrowserHost
                 let images = s.backgroundImage || "none";
                 if (images === "none") {
                   el.style.setProperty("background-image", LOCAL, "important");
-                  el.style.setProperty("background-size", "cover", "important");
+                  el.style.setProperty("background-size", "100% 100%", "important");
                   el.style.setProperty("background-repeat", "no-repeat", "important");
                   el.style.setProperty("background-position", "0 0", "important");
                   return;
