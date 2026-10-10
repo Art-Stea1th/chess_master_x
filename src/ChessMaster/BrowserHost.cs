@@ -25,6 +25,8 @@ internal static class BrowserHost
 
     private static readonly ConcurrentDictionary<string, byte[]> PieceCache = new(StringComparer.OrdinalIgnoreCase);
 
+    private static readonly ConcurrentDictionary<string, byte[]> BoardCache = new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly Regex PieceFile = new(
         @"/(w|b)[pnbrqk]\.png(?:\?|$)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -699,6 +701,19 @@ internal static class BrowserHost
             }
         }
 
+        try
+        {
+            var soft = GetSoftBoard();
+            if (soft.Length > 0)
+            {
+                File.WriteAllBytes(localBoard, soft);
+                File.WriteAllBytes(Path.Combine(BoardsDirectory, "board-flat.png"), soft);
+            }
+        }
+        catch (IOException)
+        {
+        }
+
         core.SetVirtualHostNameToFolderMapping(
             "chessmaster.boards",
             BoardsDirectory,
@@ -756,9 +771,18 @@ internal static class BrowserHost
         {
         }
 
-        var stream = new MemoryStream(File.ReadAllBytes(local), writable: false);
+        var name = Path.GetFileName(local);
+        var bytes = name.Equals("board.png", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("board-flat.png", StringComparison.OrdinalIgnoreCase)
+            ? GetSoftBoard()
+            : File.ReadAllBytes(local);
+        if (bytes.Length == 0)
+        {
+            bytes = File.ReadAllBytes(local);
+        }
+
         e.Response = core.Environment.CreateWebResourceResponse(
-            stream,
+            new MemoryStream(bytes, writable: false),
             200,
             "OK",
             "Content-Type: image/png\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n");
@@ -923,9 +947,11 @@ internal static class BrowserHost
 
             var width = bitmap.Width;
             var height = bitmap.Height;
-            var outline = white ? (byte)214 : (byte)36;
-            const byte outlineAlpha = 150;
+            var outline = white ? (byte)0 : (byte)255;
+            const byte outlineAlpha = 255;
+            const byte softAlpha = 77;
             var edge = new bool[width * height];
+            var soft = new bool[width * height];
             for (var y = 0; y < height; y++)
             {
                 for (var x = 0; x < width; x++)
@@ -935,9 +961,10 @@ internal static class BrowserHost
                         continue;
                     }
 
-                    for (var dy = -1; dy <= 1; dy++)
+                    var rim = false;
+                    for (var dy = -2; dy <= 2; dy++)
                     {
-                        for (var dx = -1; dx <= 1; dx++)
+                        for (var dx = -2; dx <= 2; dx++)
                         {
                             if (dx == 0 && dy == 0)
                             {
@@ -946,16 +973,31 @@ internal static class BrowserHost
 
                             var nx = x + dx;
                             var ny = y + dy;
+                            var near = Math.Abs(dx) <= 1 && Math.Abs(dy) <= 1;
                             if (nx < 0 || ny < 0 || nx >= width || ny >= height)
                             {
+                                rim = near || rim;
                                 continue;
                             }
 
                             if (bytes[(ny * stride) + (nx * 4) + 3] < 32)
                             {
-                                edge[(ny * width) + nx] = true;
+                                if (near)
+                                {
+                                    rim = true;
+                                    edge[(ny * width) + nx] = true;
+                                }
+                                else
+                                {
+                                    soft[(ny * width) + nx] = true;
+                                }
                             }
                         }
+                    }
+
+                    if (rim)
+                    {
+                        edge[(y * width) + x] = true;
                     }
                 }
             }
@@ -964,16 +1006,146 @@ internal static class BrowserHost
             {
                 for (var x = 0; x < width; x++)
                 {
-                    if (!edge[(y * width) + x])
+                    var i = (y * stride) + (x * 4);
+                    if (edge[(y * width) + x])
+                    {
+                        bytes[i] = outline;
+                        bytes[i + 1] = outline;
+                        bytes[i + 2] = outline;
+                        bytes[i + 3] = outlineAlpha;
+                    }
+                    else if (soft[(y * width) + x])
+                    {
+                        bytes[i] = outline;
+                        bytes[i + 1] = outline;
+                        bytes[i + 2] = outline;
+                        bytes[i + 3] = softAlpha;
+                    }
+                }
+            }
+
+            Marshal.Copy(bytes, 0, data.Scan0, bytes.Length);
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+
+        using var output = new MemoryStream();
+        bitmap.Save(output, ImageFormat.Png);
+        return output.ToArray();
+    }
+
+    private static string? BoardSourcePath()
+    {
+        Directory.CreateDirectory(BoardsDirectory);
+        var preserved = Path.Combine(BoardsDirectory, "board-source.png");
+        if (File.Exists(preserved))
+        {
+            return preserved;
+        }
+
+        var exeDir = Path.GetDirectoryName(Environment.ProcessPath);
+        foreach (var path in new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "board.png"),
+            Path.Combine(AppContext.BaseDirectory, "Assets", "board.png"),
+            exeDir is null ? "" : Path.Combine(exeDir, "board.png"),
+            Path.Combine(BoardsDirectory, "board.png"),
+        })
+        {
+            if (path.Length > 0 && File.Exists(path))
+            {
+                File.Copy(path, preserved, overwrite: false);
+                return preserved;
+            }
+        }
+
+        return File.Exists(preserved) ? preserved : null;
+    }
+
+    private static byte[] GetSoftBoard()
+    {
+        if (BoardCache.TryGetValue("soft-board", out var bytes))
+        {
+            return bytes;
+        }
+
+        var source = BoardSourcePath();
+        if (source is null)
+        {
+            return [];
+        }
+
+        bytes = SoftenBoardSquares(File.ReadAllBytes(source));
+        BoardCache["soft-board"] = bytes;
+        return bytes;
+    }
+
+    private static byte[] SoftenBoardSquares(byte[] png)
+    {
+        using var input = new MemoryStream(png, writable: false);
+        using var bitmap = new Bitmap(input);
+        var area = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        var data = bitmap.LockBits(area, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+        try
+        {
+            var stride = Math.Abs(data.Stride);
+            var bytes = new byte[stride * bitmap.Height];
+            Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+            const int files = 8;
+            const int border = 4;
+            for (var cy = 0; cy < files; cy++)
+            {
+                for (var cx = 0; cx < files; cx++)
+                {
+                    var x0 = (cx * bitmap.Width / files) + border;
+                    var y0 = (cy * bitmap.Height / files) + border;
+                    var x1 = ((cx + 1) * bitmap.Width / files) - border;
+                    var y1 = ((cy + 1) * bitmap.Height / files) - border;
+                    if (x1 <= x0 || y1 <= y0)
                     {
                         continue;
                     }
 
-                    var i = (y * stride) + (x * 4);
-                    bytes[i] = outline;
-                    bytes[i + 1] = outline;
-                    bytes[i + 2] = outline;
-                    bytes[i + 3] = outlineAlpha;
+                    long b = 0;
+                    long g = 0;
+                    long r = 0;
+                    long a = 0;
+                    var n = 0;
+                    for (var y = y0; y < y1; y++)
+                    {
+                        for (var x = x0; x < x1; x++)
+                        {
+                            var i = (y * stride) + (x * 4);
+                            b += bytes[i];
+                            g += bytes[i + 1];
+                            r += bytes[i + 2];
+                            a += bytes[i + 3];
+                            n++;
+                        }
+                    }
+
+                    if (n == 0)
+                    {
+                        continue;
+                    }
+
+                    var pb = (byte)(b / n);
+                    var pg = (byte)(g / n);
+                    var pr = (byte)(r / n);
+                    var pa = (byte)(a / n);
+                    for (var y = y0; y < y1; y++)
+                    {
+                        for (var x = x0; x < x1; x++)
+                        {
+                            var i = (y * stride) + (x * 4);
+                            bytes[i] = pb;
+                            bytes[i + 1] = pg;
+                            bytes[i + 2] = pr;
+                            bytes[i + 3] = pa;
+                        }
+                    }
                 }
             }
 
@@ -1040,7 +1212,7 @@ internal static class BrowserHost
                 }
                 const hasOfficial = BOARD_LAYER.test(images);
                 BOARD_LAYER.lastIndex = 0;
-                const hasLocal = images.includes("chessmaster.boards/board.png");
+                const hasLocal = images.includes("chessmaster.boards/board-flat.png") || images.includes("chessmaster.boards/board.png");
                 if (hasOfficial) {
                   el.style.setProperty("background-image", images.replace(BOARD_LAYER, LOCAL), "important");
                 } else if (!hasLocal) {
