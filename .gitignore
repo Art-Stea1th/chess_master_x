@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+TestResults/
+installer/publish/
+installer/output/
+installer/engine/
+installer/shell-publish/

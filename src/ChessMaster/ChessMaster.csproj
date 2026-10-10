@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RootNamespace>ChessMaster</RootNamespace>
+    <AssemblyName>ChessMaster</AssemblyName>
+    <ApplicationIcon>Assets\knight.ico</ApplicationIcon>
+    <Product>Chess Master</Product>
+    <Description>Desktop shell for chess.com</Description>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\knight.png" />
+    <EmbeddedResource Include="Assets\knight.ico" />
+  </ItemGroup>
+
+</Project>
