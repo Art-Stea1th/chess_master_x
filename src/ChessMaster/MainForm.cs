@@ -43,7 +43,9 @@ internal sealed class MainForm : ThemedForm
         bar.Controls.Add(rule);
         bar.Controls.Add(_back);
 
-        Content.Controls.Add(_web);
+        var room = new RoomLight();
+        room.Controls.Add(_web);
+        Content.Controls.Add(room);
         Content.Controls.Add(bar);
         RestorePlacement();
         Load += OnLoadAsync;

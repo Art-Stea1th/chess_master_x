@@ -50,6 +50,8 @@ internal static class BrowserHost
         var core = webView.CoreWebView2;
         core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Auto;
         await core.AddScriptToExecuteOnDocumentCreatedAsync(ScrollbarScript);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(BoardLookScript);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(PieceLookScript);
         var page = new HookedPage { Core = core };
         page.FlatScriptId = await core.AddScriptToExecuteOnDocumentCreatedAsync(FlatStyleScript());
         Pages.Add(page);
@@ -85,9 +87,12 @@ internal static class BrowserHost
         try
         {
             await page.Core.ExecuteScriptAsync($"window.chessmasterApplyFlat && window.chessmasterApplyFlat({flag})");
-            await Task.Delay(2500);
+            await page.Core.ExecuteScriptAsync("window.chessmasterPaintBoards && window.chessmasterPaintBoards()");
+            await Task.Delay(5000);
             var dump = await page.Core.ExecuteScriptAsync("window.chessmasterFlatDebug ? JSON.stringify(window.chessmasterFlatDebug()) : '{\"error\":\"no-debug\"}'");
             File.WriteAllText(Path.Combine(Root, "flat-debug.json"), dump ?? "");
+            var boards = await page.Core.ExecuteScriptAsync("window.chessmasterBoardDebug ? JSON.stringify(window.chessmasterBoardDebug()) : '[]'");
+            File.WriteAllText(Path.Combine(Root, "board-debug.json"), boards ?? "");
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
         {
@@ -636,6 +641,181 @@ internal static class BrowserHost
             ::-webkit-scrollbar-button:horizontal:start:decrement,
             ::-webkit-scrollbar-button:horizontal:end:increment { width: 0 !important; height: 0 !important; display: none !important; background: none !important; }
             ::-webkit-scrollbar-corner { background: #070708 !important; border-radius: 0 !important; }
+          `;
+          const mount = () => {
+            const parent = document.head || document.documentElement;
+            if (!parent) return;
+            let style = document.getElementById(id);
+            if (!style) {
+              style = document.createElement("style");
+              style.id = id;
+            }
+            style.textContent = css;
+            parent.appendChild(style);
+          };
+          mount();
+          document.addEventListener("DOMContentLoaded", mount);
+          window.addEventListener("load", mount);
+        })();
+        """;
+
+    private const string BoardLookScript = """
+        (() => {
+          const theme = "walnut";
+          const path = new RegExp("chess-themes/boards/[a-z0-9_-]+", "gi");
+          const next = "chess-themes/boards/" + theme;
+          const rewrite = (value) => String(value || "").replace(path, next);
+          const boardTag = (el) => {
+            const tag = (el.tagName || "").toLowerCase();
+            return tag === "wc-chess-board" || tag === "chess-board" || tag.includes("chess-board");
+          };
+
+          const paintEl = (el) => {
+            if (!el || el.nodeType !== 1) return;
+            try {
+              if (el.src && path.test(el.src)) {
+                path.lastIndex = 0;
+                const src = rewrite(el.src);
+                if (src !== el.src) el.src = src;
+              }
+              path.lastIndex = 0;
+              const bg = getComputedStyle(el).backgroundImage;
+              if (bg && path.test(bg)) {
+                path.lastIndex = 0;
+                el.style.setProperty("background-image", rewrite(bg), "important");
+              }
+              path.lastIndex = 0;
+              if (boardTag(el)) {
+                el.style.setProperty("filter", "hue-rotate(-78deg) saturate(0.82)", "important");
+              }
+              if ((el.className || "").toString().includes("piece")) {
+                el.style.setProperty("filter", "hue-rotate(78deg) saturate(1.22)", "important");
+              }
+            } catch (e) {}
+          };
+
+          const walk = (root) => {
+            if (!root || !root.querySelectorAll) return;
+            paintEl(root.host);
+            for (const el of root.querySelectorAll("*")) {
+              paintEl(el);
+              if (el.shadowRoot) walk(el.shadowRoot);
+            }
+          };
+
+          const paint = () => {
+            walk(document);
+          };
+
+          window.chessmasterPaintBoards = paint;
+          window.chessmasterBoardDebug = () => {
+            const rows = [];
+            const add = (el) => {
+              if (rows.length >= 24) return;
+              rows.push({
+                tag: el.tagName,
+                cls: String(el.className || "").slice(0, 80),
+                bg: (getComputedStyle(el).backgroundImage || "").slice(0, 160),
+                src: (el.currentSrc || el.src || "").slice(0, 160)
+              });
+            };
+            document.querySelectorAll("wc-chess-board, chess-board").forEach(add);
+            return { count: rows.length, rows };
+          };
+
+          paint();
+          document.addEventListener("DOMContentLoaded", paint);
+          window.addEventListener("load", paint);
+          setInterval(paint, 1200);
+        })();
+        """;
+
+    private const string PieceLookScript = """
+        (() => {
+          const id = "chessmaster-pieces";
+          const css = `
+            wc-chess-board .piece {
+              background-image: none !important;
+              background-color: transparent !important;
+              overflow: visible !important;
+            }
+            wc-chess-board .piece::before,
+            wc-chess-board .piece::after {
+              content: "";
+              position: absolute;
+              left: 50%;
+              transform: translateX(-50%);
+              pointer-events: none;
+              box-sizing: border-box;
+            }
+            wc-chess-board .piece.wp::before,
+            wc-chess-board .piece.wn::before,
+            wc-chess-board .piece.wb::before,
+            wc-chess-board .piece.wr::before,
+            wc-chess-board .piece.wq::before,
+            wc-chess-board .piece.wk::before {
+              background: linear-gradient(180deg, #F7F2E8 0%, #E3D5BF 46%, #B79A74 100%);
+              box-shadow: inset 0 2px 0 rgba(255,255,255,.8), inset 0 -8px 10px rgba(80,55,25,.35), 0 0 0 1px rgba(70,48,24,.55), 0 8px 5px rgba(0,0,0,.28);
+            }
+            wc-chess-board .piece.bp::before,
+            wc-chess-board .piece.bn::before,
+            wc-chess-board .piece.bb::before,
+            wc-chess-board .piece.br::before,
+            wc-chess-board .piece.bq::before,
+            wc-chess-board .piece.bk::before {
+              background: linear-gradient(180deg, #6A645C 0%, #34302C 52%, #161311 100%);
+              box-shadow: inset 0 2px 0 rgba(255,255,255,.3), inset 0 -8px 10px rgba(0,0,0,.5), 0 0 0 1px rgba(0,0,0,.45), 0 8px 5px rgba(0,0,0,.4);
+            }
+            wc-chess-board .piece.wp::before,
+            wc-chess-board .piece.bp::before { width: 38%; height: 24%; bottom: 12%; border-radius: 46% 46% 8px 8px; }
+            wc-chess-board .piece.wp::after,
+            wc-chess-board .piece.bp::after { width: 28%; height: 28%; bottom: 33%; border-radius: 50%; }
+            wc-chess-board .piece.wp::after { background: linear-gradient(180deg, #F8F4EC, #D5C6AE); box-shadow: inset 0 2px 0 rgba(255,255,255,.85), 0 0 0 1px rgba(70,48,24,.4); }
+            wc-chess-board .piece.bp::after { background: linear-gradient(180deg, #6A645C, #241F1C); box-shadow: inset 0 2px 0 rgba(255,255,255,.25), 0 0 0 1px rgba(0,0,0,.4); }
+            wc-chess-board .piece.wr::before,
+            wc-chess-board .piece.br::before { width: 44%; height: 32%; bottom: 12%; border-radius: 2px; }
+            wc-chess-board .piece.wr::after,
+            wc-chess-board .piece.br::after { width: 48%; height: 16%; bottom: 42%; }
+            wc-chess-board .piece.wr::after { background: repeating-linear-gradient(90deg, #F7F2E8 0 20%, transparent 20% 33%, #F7F2E8 33% 53%, transparent 53% 66%, #F7F2E8 66% 100%); }
+            wc-chess-board .piece.br::after { background: repeating-linear-gradient(90deg, #6A645C 0 20%, transparent 20% 33%, #6A645C 33% 53%, transparent 53% 66%, #6A645C 66% 100%); }
+            wc-chess-board .piece.wb::before,
+            wc-chess-board .piece.bb::before { width: 40%; height: 50%; bottom: 12%; border-radius: 0; clip-path: polygon(50% 2%, 88% 100%, 12% 100%); }
+            wc-chess-board .piece.wb::after,
+            wc-chess-board .piece.bb::after { width: 16%; height: 16%; bottom: 56%; border-radius: 50%; }
+            wc-chess-board .piece.wb::after { background: radial-gradient(circle at 50% 42%, #F8F4EC 0 42%, #6E5434 46% 56%, #E7DCC8 57% 100%); }
+            wc-chess-board .piece.bb::after { background: radial-gradient(circle at 50% 42%, #6A645C 0 42%, #E6DCC8 46% 56%, #2A2623 57% 100%); }
+            wc-chess-board .piece.wn::before,
+            wc-chess-board .piece.bn::before {
+              width: 68%; height: 62%; bottom: 12%; border-radius: 0;
+              clip-path: polygon(32% 100%, 30% 70%, 16% 64%, 24% 46%, 42% 40%, 36% 26%, 50% 12%, 66% 20%, 58% 34%, 74% 38%, 90% 26%, 80% 50%, 62% 54%, 68% 100%);
+            }
+            wc-chess-board .piece.wn::after,
+            wc-chess-board .piece.bn::after { width: 8%; height: 8%; bottom: 56%; left: 61%; border-radius: 50%; transform: none; }
+            wc-chess-board .piece.wn::after { background: #2A241C; }
+            wc-chess-board .piece.bn::after { background: #E6DCC8; }
+            wc-chess-board .piece.wq::before,
+            wc-chess-board .piece.bq::before { width: 42%; height: 38%; bottom: 12%; border-radius: 48% 48% 8px 8px; }
+            wc-chess-board .piece.wq::after,
+            wc-chess-board .piece.bq::after {
+              width: 54%; height: 22%; bottom: 44%;
+              clip-path: polygon(0 100%, 0 42%, 16% 78%, 30% 18%, 42% 78%, 50% 0, 58% 78%, 70% 18%, 84% 78%, 100% 42%, 100% 100%);
+            }
+            wc-chess-board .piece.wq::after { background: linear-gradient(180deg, #F8F4EC, #CDB892); }
+            wc-chess-board .piece.bq::after { background: linear-gradient(180deg, #6A645C, #2A2623); }
+            wc-chess-board .piece.wk::before,
+            wc-chess-board .piece.bk::before { width: 40%; height: 42%; bottom: 12%; border-radius: 10px 10px 6px 6px; }
+            wc-chess-board .piece.wk::after,
+            wc-chess-board .piece.bk::after { width: 28%; height: 30%; bottom: 48%; }
+            wc-chess-board .piece.wk::after {
+              background:
+                linear-gradient(#F4EFE4, #F4EFE4) center / 34% 100% no-repeat,
+                linear-gradient(#F4EFE4, #F4EFE4) center / 100% 32% no-repeat;
+            }
+            wc-chess-board .piece.bk::after {
+              background:
+                linear-gradient(#E6DCC8, #E6DCC8) center / 34% 100% no-repeat,
+                linear-gradient(#E6DCC8, #E6DCC8) center / 100% 32% no-repeat;
+            }
           `;
           const mount = () => {
             const parent = document.head || document.documentElement;
