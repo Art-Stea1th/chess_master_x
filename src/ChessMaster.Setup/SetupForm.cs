@@ -44,7 +44,7 @@ internal sealed class SetupForm : ThemedForm
         KeyPreview = true;
 
         _heading = MakeLabel("Шахматы", heading: true, AppTheme.TextLight);
-        _meta = MakeLabel("Chess Master   ·   1.0.4", heading: false, AppTheme.TextDark);
+        _meta = MakeLabel("Chess Master   ·   1.0.6", heading: false, AppTheme.TextDark);
         _about = MakeLabel(
             "Сейчас будут установлены шахматы.",
             heading: false,
