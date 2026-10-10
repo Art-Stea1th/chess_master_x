@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Art-Stea1th/chess_master/releases/tag/v1.0.0"><strong>Download 1.0.0</strong></a>
+  <a href="https://github.com/Art-Stea1th/chess_master_x/releases/tag/v1.0.1"><strong>Download 1.0.1</strong></a>
   &nbsp;·&nbsp; Windows x64
   &nbsp;·&nbsp; no administrator rights
 </p>
@@ -25,7 +25,7 @@
 
 ## Install
 
-Download [ChessMaster-Setup-1.0.0.exe](https://github.com/Art-Stea1th/chess_master/releases/download/v1.0.0/ChessMaster-Setup-1.0.0.exe) and run it.
+Download [ChessMaster-Setup-1.0.1.exe](https://github.com/Art-Stea1th/chess_master_x/releases/download/v1.0.1/ChessMaster-Setup-1.0.1.exe) and run it.
 
 The installer puts the app in your user profile:
 
