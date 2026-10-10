@@ -2,7 +2,7 @@
 ; The shell draws the window. This only copies files into the user profile.
 
 #define MyAppName "Chess Master"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppExe "ChessMaster.exe"
 
 [Setup]
@@ -10,7 +10,7 @@ AppId={{A7C3E1B4-8F2D-4C6A-9B15-2D4E6F8A0C31}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
-VersionInfoVersion=1.0.0.0
+VersionInfoVersion=1.0.1.0
 VersionInfoDescription=Desktop shell for chess.com
 DefaultDirName={localappdata}\Programs\Chess Master
 DisableDirPage=yes
@@ -19,7 +19,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=engine
-OutputBaseFilename=ChessMaster-Engine-1.0.0
+OutputBaseFilename=ChessMaster-Engine-1.0.1
 SetupIconFile=..\src\ChessMaster\Assets\knight.ico
 UninstallDisplayIcon={app}\{#MyAppExe}
 Compression=lzma2
