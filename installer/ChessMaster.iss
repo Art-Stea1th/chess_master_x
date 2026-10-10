@@ -3,7 +3,7 @@
 ; User data stays in {localappdata}\ChessMaster and is not removed on uninstall.
 
 #define MyAppName "Chess Master"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppExe "ChessMaster.exe"
 
 [Setup]
@@ -11,7 +11,7 @@ AppId={{A7C3E1B4-8F2D-4C6A-9B15-2D4E6F8A0C31}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
-VersionInfoVersion=1.0.2.0
+VersionInfoVersion=1.0.3.0
 VersionInfoDescription=Desktop shell for chess.com
 DefaultDirName={localappdata}\Programs\Chess Master
 DisableDirPage=yes
@@ -20,7 +20,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=output
-OutputBaseFilename=ChessMaster-Setup-1.0.2
+OutputBaseFilename=ChessMaster-Setup-1.0.3
 SetupIconFile=..\src\ChessMaster\Assets\knight.ico
 UninstallDisplayIcon={app}\{#MyAppExe}
 Compression=lzma2

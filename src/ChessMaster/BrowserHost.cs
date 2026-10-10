@@ -1,4 +1,9 @@
+using System.Collections.Concurrent;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -15,6 +20,14 @@ internal static class BrowserHost
     public static string WindowFile { get; } = Path.Combine(Root, "window.json");
 
     public static string BoardsDirectory { get; } = Path.Combine(Root, "boards");
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
+
+    private static readonly ConcurrentDictionary<string, byte[]> PieceCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly Regex PieceFile = new(
+        @"/(w|b)[pnbrqk]\.png(?:\?|$)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private sealed class HookedPage
     {
@@ -717,6 +730,13 @@ internal static class BrowserHost
         }
 
         var uri = e.Request.Uri;
+        if (TryGetPieceSide(uri, out var white))
+        {
+            var deferral = e.GetDeferral();
+            _ = ServePieceAsync(core, e, deferral, uri, white);
+            return;
+        }
+
         if (!IsLocalBoardUri(uri))
         {
             return;
@@ -810,6 +830,165 @@ internal static class BrowserHost
         }
     }
 
+    private static bool TryGetPieceSide(string? uri, out bool white)
+    {
+        white = false;
+        if (string.IsNullOrEmpty(uri))
+        {
+            return false;
+        }
+
+        if (uri.IndexOf("assets-themes.chess.com/image/", StringComparison.OrdinalIgnoreCase) < 0
+            && uri.IndexOf("/chess-themes/pieces/", StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        var match = PieceFile.Match(uri);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        white = match.Groups[1].Value.Equals("w", StringComparison.OrdinalIgnoreCase);
+        return true;
+    }
+
+    private static async Task ServePieceAsync(
+        CoreWebView2 core,
+        CoreWebView2WebResourceRequestedEventArgs e,
+        CoreWebView2Deferral deferral,
+        string uri,
+        bool white)
+    {
+        try
+        {
+            if (!PieceCache.TryGetValue(uri, out var bytes))
+            {
+                bytes = RecolorPiece(await Http.GetByteArrayAsync(uri), white);
+                PieceCache[uri] = bytes;
+            }
+
+            e.Response = core.Environment.CreateWebResourceResponse(
+                new MemoryStream(bytes, writable: false),
+                200,
+                "OK",
+                "Content-Type: image/png\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or ArgumentException or ExternalException)
+        {
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    private static byte[] RecolorPiece(byte[] png, bool white)
+    {
+        using var input = new MemoryStream(png, writable: false);
+        using var bitmap = new Bitmap(input);
+        var area = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        var data = bitmap.LockBits(area, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+        try
+        {
+            var stride = Math.Abs(data.Stride);
+            var bytes = new byte[stride * bitmap.Height];
+            Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+            for (var i = 0; i < bytes.Length; i += 4)
+            {
+                var alpha = bytes[i + 3];
+                if (alpha == 0)
+                {
+                    continue;
+                }
+
+                var luminance = (0.2126 * bytes[i + 2]) + (0.7152 * bytes[i + 1]) + (0.0722 * bytes[i]);
+                int value;
+                if (white)
+                {
+                    var t = Math.Pow(luminance / 255.0, 0.28);
+                    value = (int)Math.Clamp(232 + (t * 23), 232, 255);
+                }
+                else
+                {
+                    var t = Math.Pow(luminance / 255.0, 2.4);
+                    value = (int)Math.Clamp(t * 22, 0, 22);
+                }
+
+                bytes[i] = (byte)value;
+                bytes[i + 1] = (byte)value;
+                bytes[i + 2] = (byte)value;
+            }
+
+            var width = bitmap.Width;
+            var height = bitmap.Height;
+            var outline = white ? (byte)214 : (byte)36;
+            const byte outlineAlpha = 150;
+            var edge = new bool[width * height];
+            for (var y = 0; y < height; y++)
+            {
+                for (var x = 0; x < width; x++)
+                {
+                    if (bytes[(y * stride) + (x * 4) + 3] < 32)
+                    {
+                        continue;
+                    }
+
+                    for (var dy = -1; dy <= 1; dy++)
+                    {
+                        for (var dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0)
+                            {
+                                continue;
+                            }
+
+                            var nx = x + dx;
+                            var ny = y + dy;
+                            if (nx < 0 || ny < 0 || nx >= width || ny >= height)
+                            {
+                                continue;
+                            }
+
+                            if (bytes[(ny * stride) + (nx * 4) + 3] < 32)
+                            {
+                                edge[(ny * width) + nx] = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (var y = 0; y < height; y++)
+            {
+                for (var x = 0; x < width; x++)
+                {
+                    if (!edge[(y * width) + x])
+                    {
+                        continue;
+                    }
+
+                    var i = (y * stride) + (x * 4);
+                    bytes[i] = outline;
+                    bytes[i + 1] = outline;
+                    bytes[i + 2] = outline;
+                    bytes[i + 3] = outlineAlpha;
+                }
+            }
+
+            Marshal.Copy(bytes, 0, data.Scan0, bytes.Length);
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+
+        using var output = new MemoryStream();
+        bitmap.Save(output, ImageFormat.Png);
+        return output.ToArray();
+    }
+
     private static async Task DumpBoardsLater(HookedPage page)
     {
         try
@@ -893,86 +1072,7 @@ internal static class BrowserHost
           const id = "chessmaster-pieces";
           const css = `
             wc-chess-board .piece {
-              background-image: none !important;
-              background-color: transparent !important;
-              overflow: visible !important;
-            }
-            wc-chess-board .piece::before,
-            wc-chess-board .piece::after {
-              content: "";
-              position: absolute;
-              left: 50%;
-              transform: translateX(-50%);
-              pointer-events: none;
-              box-sizing: border-box;
-            }
-            wc-chess-board .piece.wp::before,
-            wc-chess-board .piece.wn::before,
-            wc-chess-board .piece.wb::before,
-            wc-chess-board .piece.wr::before,
-            wc-chess-board .piece.wq::before,
-            wc-chess-board .piece.wk::before {
-              background: linear-gradient(180deg, #F7F2E8 0%, #E3D5BF 46%, #B79A74 100%);
-              box-shadow: inset 0 2px 0 rgba(255,255,255,.8), inset 0 -8px 10px rgba(80,55,25,.35), 0 0 0 1px rgba(70,48,24,.55), 0 8px 5px rgba(0,0,0,.28);
-            }
-            wc-chess-board .piece.bp::before,
-            wc-chess-board .piece.bn::before,
-            wc-chess-board .piece.bb::before,
-            wc-chess-board .piece.br::before,
-            wc-chess-board .piece.bq::before,
-            wc-chess-board .piece.bk::before {
-              background: linear-gradient(180deg, #6A645C 0%, #34302C 52%, #161311 100%);
-              box-shadow: inset 0 2px 0 rgba(255,255,255,.3), inset 0 -8px 10px rgba(0,0,0,.5), 0 0 0 1px rgba(0,0,0,.45), 0 8px 5px rgba(0,0,0,.4);
-            }
-            wc-chess-board .piece.wp::before,
-            wc-chess-board .piece.bp::before { width: 38%; height: 24%; bottom: 12%; border-radius: 46% 46% 8px 8px; }
-            wc-chess-board .piece.wp::after,
-            wc-chess-board .piece.bp::after { width: 28%; height: 28%; bottom: 33%; border-radius: 50%; }
-            wc-chess-board .piece.wp::after { background: linear-gradient(180deg, #F8F4EC, #D5C6AE); box-shadow: inset 0 2px 0 rgba(255,255,255,.85), 0 0 0 1px rgba(70,48,24,.4); }
-            wc-chess-board .piece.bp::after { background: linear-gradient(180deg, #6A645C, #241F1C); box-shadow: inset 0 2px 0 rgba(255,255,255,.25), 0 0 0 1px rgba(0,0,0,.4); }
-            wc-chess-board .piece.wr::before,
-            wc-chess-board .piece.br::before { width: 44%; height: 32%; bottom: 12%; border-radius: 2px; }
-            wc-chess-board .piece.wr::after,
-            wc-chess-board .piece.br::after { width: 48%; height: 16%; bottom: 42%; }
-            wc-chess-board .piece.wr::after { background: repeating-linear-gradient(90deg, #F7F2E8 0 20%, transparent 20% 33%, #F7F2E8 33% 53%, transparent 53% 66%, #F7F2E8 66% 100%); }
-            wc-chess-board .piece.br::after { background: repeating-linear-gradient(90deg, #6A645C 0 20%, transparent 20% 33%, #6A645C 33% 53%, transparent 53% 66%, #6A645C 66% 100%); }
-            wc-chess-board .piece.wb::before,
-            wc-chess-board .piece.bb::before { width: 40%; height: 50%; bottom: 12%; border-radius: 0; clip-path: polygon(50% 2%, 88% 100%, 12% 100%); }
-            wc-chess-board .piece.wb::after,
-            wc-chess-board .piece.bb::after { width: 16%; height: 16%; bottom: 56%; border-radius: 50%; }
-            wc-chess-board .piece.wb::after { background: radial-gradient(circle at 50% 42%, #F8F4EC 0 42%, #6E5434 46% 56%, #E7DCC8 57% 100%); }
-            wc-chess-board .piece.bb::after { background: radial-gradient(circle at 50% 42%, #6A645C 0 42%, #E6DCC8 46% 56%, #2A2623 57% 100%); }
-            wc-chess-board .piece.wn::before,
-            wc-chess-board .piece.bn::before {
-              width: 68%; height: 62%; bottom: 12%; border-radius: 0;
-              clip-path: polygon(32% 100%, 30% 70%, 16% 64%, 24% 46%, 42% 40%, 36% 26%, 50% 12%, 66% 20%, 58% 34%, 74% 38%, 90% 26%, 80% 50%, 62% 54%, 68% 100%);
-            }
-            wc-chess-board .piece.wn::after,
-            wc-chess-board .piece.bn::after { width: 8%; height: 8%; bottom: 56%; left: 61%; border-radius: 50%; transform: none; }
-            wc-chess-board .piece.wn::after { background: #2A241C; }
-            wc-chess-board .piece.bn::after { background: #E6DCC8; }
-            wc-chess-board .piece.wq::before,
-            wc-chess-board .piece.bq::before { width: 42%; height: 38%; bottom: 12%; border-radius: 48% 48% 8px 8px; }
-            wc-chess-board .piece.wq::after,
-            wc-chess-board .piece.bq::after {
-              width: 54%; height: 22%; bottom: 44%;
-              clip-path: polygon(0 100%, 0 42%, 16% 78%, 30% 18%, 42% 78%, 50% 0, 58% 78%, 70% 18%, 84% 78%, 100% 42%, 100% 100%);
-            }
-            wc-chess-board .piece.wq::after { background: linear-gradient(180deg, #F8F4EC, #CDB892); }
-            wc-chess-board .piece.bq::after { background: linear-gradient(180deg, #6A645C, #2A2623); }
-            wc-chess-board .piece.wk::before,
-            wc-chess-board .piece.bk::before { width: 40%; height: 42%; bottom: 12%; border-radius: 10px 10px 6px 6px; }
-            wc-chess-board .piece.wk::after,
-            wc-chess-board .piece.bk::after { width: 28%; height: 30%; bottom: 48%; }
-            wc-chess-board .piece.wk::after {
-              background:
-                linear-gradient(#F4EFE4, #F4EFE4) center / 34% 100% no-repeat,
-                linear-gradient(#F4EFE4, #F4EFE4) center / 100% 32% no-repeat;
-            }
-            wc-chess-board .piece.bk::after {
-              background:
-                linear-gradient(#E6DCC8, #E6DCC8) center / 34% 100% no-repeat,
-                linear-gradient(#E6DCC8, #E6DCC8) center / 100% 32% no-repeat;
+              filter: none;
             }
           `;
           const mount = () => {
