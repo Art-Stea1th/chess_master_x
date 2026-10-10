@@ -14,6 +14,8 @@ internal static class BrowserHost
 
     public static string WindowFile { get; } = Path.Combine(Root, "window.json");
 
+    public static string BoardsDirectory { get; } = Path.Combine(Root, "boards");
+
     private sealed class HookedPage
     {
         public required CoreWebView2 Core { get; init; }
@@ -49,8 +51,17 @@ internal static class BrowserHost
         settings.IsZoomControlEnabled = true;
         var core = webView.CoreWebView2;
         core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Auto;
+        HookBoardSwap(core);
+        try
+        {
+            await core.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.DiskCache);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or COMException)
+        {
+        }
+
         await core.AddScriptToExecuteOnDocumentCreatedAsync(ScrollbarScript);
-        await core.AddScriptToExecuteOnDocumentCreatedAsync(BoardLookScript);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(BoardLookScript());
         await core.AddScriptToExecuteOnDocumentCreatedAsync(PieceLookScript);
         var page = new HookedPage { Core = core };
         page.FlatScriptId = await core.AddScriptToExecuteOnDocumentCreatedAsync(FlatStyleScript());
@@ -88,11 +99,7 @@ internal static class BrowserHost
         {
             await page.Core.ExecuteScriptAsync($"window.chessmasterApplyFlat && window.chessmasterApplyFlat({flag})");
             await page.Core.ExecuteScriptAsync("window.chessmasterPaintBoards && window.chessmasterPaintBoards()");
-            await Task.Delay(5000);
-            var dump = await page.Core.ExecuteScriptAsync("window.chessmasterFlatDebug ? JSON.stringify(window.chessmasterFlatDebug()) : '{\"error\":\"no-debug\"}'");
-            File.WriteAllText(Path.Combine(Root, "flat-debug.json"), dump ?? "");
-            var boards = await page.Core.ExecuteScriptAsync("window.chessmasterBoardDebug ? JSON.stringify(window.chessmasterBoardDebug()) : '[]'");
-            File.WriteAllText(Path.Combine(Root, "board-debug.json"), boards ?? "");
+            _ = DumpBoardsLater(page);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
         {
@@ -659,76 +666,210 @@ internal static class BrowserHost
         })();
         """;
 
-    private const string BoardLookScript = """
-        (() => {
-          const theme = "walnut";
-          const path = new RegExp("chess-themes/boards/[a-z0-9_-]+", "gi");
-          const next = "chess-themes/boards/" + theme;
-          const rewrite = (value) => String(value || "").replace(path, next);
-          const boardTag = (el) => {
-            const tag = (el.tagName || "").toLowerCase();
-            return tag === "wc-chess-board" || tag === "chess-board" || tag.includes("chess-board");
-          };
+    private static void HookBoardSwap(CoreWebView2 core)
+    {
+        Directory.CreateDirectory(BoardsDirectory);
+        core.SetVirtualHostNameToFolderMapping(
+            "chessmaster.boards",
+            BoardsDirectory,
+            CoreWebView2HostResourceAccessKind.Allow);
+        core.AddWebResourceRequestedFilter(
+            "https://assets-themes.chess.com/*",
+            CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
+        core.AddWebResourceRequestedFilter(
+            "https://images.chesscomfiles.com/*",
+            CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
+        core.AddWebResourceRequestedFilter(
+            "https://www.chess.com/*",
+            CoreWebView2WebResourceContext.Image,
+            CoreWebView2WebResourceRequestSourceKinds.All);
+        core.AddWebResourceRequestedFilter(
+            "https://chessmaster.boards/*",
+            CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
+        core.WebResourceRequested += OnBoardRequested;
+    }
 
-          const paintEl = (el) => {
-            if (!el || el.nodeType !== 1) return;
-            try {
-              if (el.src && path.test(el.src)) {
-                path.lastIndex = 0;
-                const src = rewrite(el.src);
-                if (src !== el.src) el.src = src;
-              }
-              path.lastIndex = 0;
-              const bg = getComputedStyle(el).backgroundImage;
-              if (bg && path.test(bg)) {
-                path.lastIndex = 0;
-                el.style.setProperty("background-image", rewrite(bg), "important");
-              }
-              path.lastIndex = 0;
-              if (boardTag(el)) {
-                el.style.setProperty("filter", "hue-rotate(-78deg) saturate(0.82)", "important");
-              }
-              if ((el.className || "").toString().includes("piece")) {
-                el.style.setProperty("filter", "hue-rotate(78deg) saturate(1.22)", "important");
-              }
-            } catch (e) {}
-          };
+    private static void OnBoardRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        if (sender is not CoreWebView2 core)
+        {
+            return;
+        }
 
-          const walk = (root) => {
-            if (!root || !root.querySelectorAll) return;
-            paintEl(root.host);
-            for (const el of root.querySelectorAll("*")) {
-              paintEl(el);
-              if (el.shadowRoot) walk(el.shadowRoot);
+        var uri = e.Request.Uri;
+        if (!IsLocalBoardUri(uri))
+        {
+            return;
+        }
+
+        var local = ResolveBoardFile(uri);
+        if (local is null)
+        {
+            return;
+        }
+
+        try
+        {
+            File.AppendAllText(Path.Combine(Root, "hook.log"), uri + Environment.NewLine);
+        }
+        catch (IOException)
+        {
+        }
+
+        var stream = new MemoryStream(File.ReadAllBytes(local), writable: false);
+        e.Response = core.Environment.CreateWebResourceResponse(
+            stream,
+            200,
+            "OK",
+            "Content-Type: image/png\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n");
+    }
+
+    private static string? ResolveBoardFile(string uri)
+    {
+        var folder = BoardsDirectory;
+        if (!Directory.Exists(folder))
+        {
+            return null;
+        }
+
+        var all = Path.Combine(folder, "board.png");
+        if (File.Exists(all))
+        {
+            return all;
+        }
+
+        try
+        {
+            var parts = new Uri(uri).AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var index = Array.FindIndex(parts, part => part.Equals("boards", StringComparison.OrdinalIgnoreCase));
+            if (index >= 0 && index + 1 < parts.Length)
+            {
+                var theme = parts[index + 1];
+                var named = Path.Combine(folder, theme + ".png");
+                if (File.Exists(named))
+                {
+                    return named;
+                }
             }
-          };
+        }
+        catch (UriFormatException)
+        {
+        }
 
-          const paint = () => {
-            walk(document);
-          };
+        return null;
+    }
 
-          window.chessmasterPaintBoards = paint;
-          window.chessmasterBoardDebug = () => {
-            const rows = [];
-            const add = (el) => {
-              if (rows.length >= 24) return;
-              rows.push({
-                tag: el.tagName,
-                cls: String(el.className || "").slice(0, 80),
-                bg: (getComputedStyle(el).backgroundImage || "").slice(0, 160),
-                src: (el.currentSrc || el.src || "").slice(0, 160)
-              });
-            };
-            document.querySelectorAll("wc-chess-board, chess-board").forEach(add);
-            return { count: rows.length, rows };
-          };
+    private static bool IsLocalBoardUri(string? uri)
+    {
+        if (string.IsNullOrEmpty(uri))
+        {
+            return false;
+        }
 
-          paint();
-          document.addEventListener("DOMContentLoaded", paint);
-          window.addEventListener("load", paint);
-          setInterval(paint, 1200);
-        })();
-        """;
+        if (uri.Contains("chessmaster.boards", StringComparison.OrdinalIgnoreCase)
+            || uri.Contains("/chess-themes/boards/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!uri.Contains("assets-themes.chess.com/image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            return System.Text.RegularExpressions.Regex.IsMatch(
+                new Uri(uri).AbsolutePath,
+                @"^/image/[^/]+/\d+\.png$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task DumpBoardsLater(HookedPage page)
+    {
+        try
+        {
+            await Task.Delay(4000);
+            var dump = await page.Core.ExecuteScriptAsync("""
+                (() => {
+                  const sel = ".recommended-activity-board-preview, .daily-puzzle-preview, .recommended-activity-board, wc-chess-board, .board";
+                  const nodes = [...document.querySelectorAll(sel)].map((el) => {
+                    const s = getComputedStyle(el);
+                    return {
+                      cls: String(el.className || "").slice(0, 80),
+                      color: s.backgroundColor,
+                      size: s.backgroundSize,
+                      pos: s.backgroundPosition,
+                      repeat: s.backgroundRepeat,
+                      bg: s.backgroundImage
+                    };
+                  });
+                  return JSON.stringify({ count: nodes.length, nodes });
+                })()
+                """);
+            File.WriteAllText(Path.Combine(Root, "board-debug.json"), dump ?? "");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException or IOException)
+        {
+        }
+    }
+
+    private static string BoardLookScript()
+    {
+        const string tile = "https://chessmaster.boards/board.png";
+        return $$"""
+            (() => {
+              const TILE = "{{tile}}";
+              const SELECTORS = "wc-chess-board, chess-board, cc-chess-board, #board-board, #board, .board, .recommended-activity-board-preview, .recommended-activity-board, .daily-puzzle-preview";
+              const BOARD_LAYER = /url\((['"]?)https?:\/\/assets-themes\.chess\.com\/image\/[^/]+\/\d+\.png\1\)/gi;
+              const LOCAL = `url("${TILE}")`;
+              const paint = (el) => {
+                if (!el || !el.style || el.classList.contains("recommended-activity-board")) return;
+                const s = getComputedStyle(el);
+                let images = s.backgroundImage || "none";
+                if (images === "none") {
+                  el.style.setProperty("background-image", LOCAL, "important");
+                  el.style.setProperty("background-size", "cover", "important");
+                  el.style.setProperty("background-repeat", "no-repeat", "important");
+                  el.style.setProperty("background-position", "0 0", "important");
+                  return;
+                }
+                const hasOfficial = BOARD_LAYER.test(images);
+                BOARD_LAYER.lastIndex = 0;
+                const hasLocal = images.includes("chessmaster.boards/board.png");
+                if (hasOfficial) {
+                  el.style.setProperty("background-image", images.replace(BOARD_LAYER, LOCAL), "important");
+                } else if (!hasLocal) {
+                  el.style.setProperty("background-image", `${images}, ${LOCAL}`, "important");
+                  el.style.setProperty("background-size", `${s.backgroundSize}, cover`, "important");
+                  el.style.setProperty("background-position", `${s.backgroundPosition}, 0 0`, "important");
+                  el.style.setProperty("background-repeat", `${s.backgroundRepeat}, no-repeat`, "important");
+                }
+                el.style.setProperty("background-color", "transparent", "important");
+              };
+              const walk = (root) => {
+                root.querySelectorAll(SELECTORS).forEach(paint);
+                root.querySelectorAll("*").forEach((el) => {
+                  if (el.shadowRoot) walk(el.shadowRoot);
+                });
+              };
+              const mount = () => walk(document);
+              window.chessmasterPaintBoards = mount;
+              mount();
+              document.addEventListener("DOMContentLoaded", mount);
+              window.addEventListener("load", mount);
+              setInterval(mount, 1500);
+            })();
+            """;
+    }
 
     private const string PieceLookScript = """
         (() => {
